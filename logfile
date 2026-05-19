@@ -1,0 +1,2040 @@
+2026-05-15 12:57:59.639 BST [36111] LOG:  starting PostgreSQL 18.3 (Homebrew) on aarch64-apple-darwin25.2.0, compiled by Apple clang version 17.0.0 (clang-1700.6.3.2), 64-bit
+2026-05-15 12:57:59.644 BST [36111] LOG:  listening on IPv4 address "127.0.0.1", port 5432
+2026-05-15 12:57:59.644 BST [36111] LOG:  listening on IPv6 address "::1", port 5432
+2026-05-15 12:57:59.646 BST [36111] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+2026-05-15 12:57:59.663 BST [36117] LOG:  database system was shut down at 2026-05-14 17:04:10 BST
+2026-05-15 12:57:59.679 BST [36111] LOG:  database system is ready to accept connections
+2026-05-15 13:02:59.662 BST [36115] LOG:  checkpoint starting: time
+2026-05-15 13:02:59.918 BST [36115] LOG:  checkpoint complete: wrote 2 buffers (0.0%), wrote 3 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.210 s, sync=0.008 s, total=0.260 s; sync files=4, longest=0.005 s, average=0.002 s; distance=10 kB, estimate=10 kB; lsn=A/D53714A0, redo lsn=A/D5371448
+2026-05-15 16:12:59.794 BST [36115] LOG:  checkpoint starting: time
+2026-05-15 16:13:00.876 BST [36115] LOG:  checkpoint complete: wrote 10 buffers (0.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=1.043 s, sync=0.005 s, total=1.089 s; sync files=3, longest=0.002 s, average=0.002 s; distance=68 kB, estimate=68 kB; lsn=A/D5382758, redo lsn=A/D5382700
+2026-05-15 16:38:39.048 BST [42338] ERROR:  relation "xt_players" does not exist
+2026-05-15 16:38:39.048 BST [42338] STATEMENT:  CREATE INDEX idx_xt_players_team   ON xt_players (team)
+2026-05-15 16:41:55.135 BST [42338] ERROR:  syntax error at end of input at character 2993
+2026-05-15 16:41:55.135 BST [42338] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "Event", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         x, y, finalx, finaly,
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "TakeOn Outcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "Event" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "Event", "player", "teamShortName", x, y,
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."Event", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e.x IS NOT NULL AND e.y IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 16:42:59.878 BST [36115] LOG:  checkpoint starting: time
+2026-05-15 16:43:03.253 BST [36115] LOG:  checkpoint complete: wrote 32 buffers (0.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=3.309 s, sync=0.042 s, total=3.377 s; sync files=29, longest=0.005 s, average=0.002 s; distance=147 kB, estimate=147 kB; lsn=A/D53A75A8, redo lsn=A/D53A7518
+2026-05-15 16:44:21.071 BST [42338] ERROR:  syntax error at end of input at character 2993
+2026-05-15 16:44:21.071 BST [42338] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "Event", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         x, y, finalx, finaly,
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "TakeOn Outcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "Event" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "Event", "player", "teamShortName", x, y,
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."Event", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e.x IS NOT NULL AND e.y IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 16:48:17.737 BST [42338] ERROR:  syntax error at end of input at character 3038
+2026-05-15 16:48:17.737 BST [42338] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "playType", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         x, y, finalx, finaly,
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "TakeOn Outcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("playType")      OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "playType", "player", "teamShortName", x, y,
+	    CASE
+	      WHEN "playType" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "playType" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "playType" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "playType" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "playType" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "playType" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "playType" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN finalx
+	      WHEN "playType" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN finaly
+	      WHEN "playType" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."playType", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e.x IS NOT NULL AND e.y IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 16:53:37.264 BST [42338] ERROR:  syntax error at end of input at character 3142
+2026-05-15 16:53:37.264 BST [42338] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "playType", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         "EventX", "EventY", "PassEndX", "PassEndY",
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "TakeOn Outcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("playType")      OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD("EventX")        OVER w AS next_x,
+	    LEAD("EventY")        OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "playType", "player", "teamShortName",
+	    "EventX", "EventY",
+	    CASE
+	      WHEN "playType" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "playType" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "playType" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "playType" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "playType" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "playType" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "playType" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndX"
+	      WHEN "playType" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndY"
+	      WHEN "playType" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."playType", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EventY"::numeric, 12.5) = 0 THEN FLOOR(e."EventY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EventY" / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EventX"::numeric, 8.33) = 0 THEN FLOOR(e."EventX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EventX" / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e."EventX" IS NOT NULL AND e."EventY" IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 16:58:56.771 BST [42486] ERROR:  syntax error at end of input at character 3141
+2026-05-15 16:58:56.771 BST [42486] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "playType", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         "EventX", "EventY", "PassEndX", "PassEndY",
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "takeOnOutcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("playType")      OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD("EventX")        OVER w AS next_x,
+	    LEAD("EventY")        OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "playType", "player", "teamShortName",
+	    "EventX", "EventY",
+	    CASE
+	      WHEN "playType" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "playType" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "playType" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "playType" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "playType" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "playType" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "playType" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndX"
+	      WHEN "playType" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndY"
+	      WHEN "playType" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."playType", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EventY"::numeric, 12.5) = 0 THEN FLOOR(e."EventY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EventY" / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EventX"::numeric, 8.33) = 0 THEN FLOOR(e."EventX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EventX" / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e."EventX" IS NOT NULL AND e."EventY" IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 16:59:18.409 BST [42486] ERROR:  syntax error at end of input at character 3140
+2026-05-15 16:59:18.409 BST [42486] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "playType", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         "EventX", "EventY", "PassEndX", "PassEndY",
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "takeOnOutcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("playType")      OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD("EventX")        OVER w AS next_x,
+	    LEAD("EventY")        OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "playType", "player", "teamShortName",
+	    "EventX", "EventY",
+	    CASE
+	      WHEN "playType" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "playType" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "playType" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "playType" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "playType" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "playType" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "playType" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndX"
+	      WHEN "playType" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndY"
+	      WHEN "playType" = 'TakeOn' AND "takeOnOutcome"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."playType", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EventY"::numeric, 12.5) = 0 THEN FLOOR(e."EventY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EventY" / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EventX"::numeric, 8.33) = 0 THEN FLOOR(e."EventX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EventX" / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e."EventX" IS NOT NULL AND e."EventY" IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 17:04:08.529 BST [42486] ERROR:  syntax error at end of input at character 3151
+2026-05-15 17:04:08.529 BST [42486] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "playType", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         "EventX", "EventY", "PassEndX", "PassEndY",
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "Successful TakeOn", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("playType")      OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD("EventX")        OVER w AS next_x,
+	    LEAD("EventY")        OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "playType", "player", "teamShortName",
+	    "EventX", "EventY",
+	    CASE
+	      WHEN "playType" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "playType" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "playType" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "playType" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "playType" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "playType" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "playType" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndX"
+	      WHEN "playType" = 'TakeOn' AND "Successful TakeOn"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndY"
+	      WHEN "playType" = 'TakeOn' AND "Successful TakeOn"::text IN ('1', 'true')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."playType", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EventY"::numeric, 12.5) = 0 THEN FLOOR(e."EventY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EventY" / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EventX"::numeric, 8.33) = 0 THEN FLOOR(e."EventX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EventX" / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e."EventX" IS NOT NULL AND e."EventY" IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 17:05:25.609 BST [42486] ERROR:  syntax error at end of input at character 28
+2026-05-15 17:05:25.609 BST [42486] STATEMENT:  CREATE TABLE xt_players AS 
+2026-05-15 17:07:52.865 BST [42486] ERROR:  syntax error at end of input at character 27
+2026-05-15 17:07:52.865 BST [42486] STATEMENT:  CREATE TABLE xt_players AS
+2026-05-15 17:09:56.256 BST [42486] ERROR:  syntax error at end of input at character 3167
+2026-05-15 17:09:56.256 BST [42486] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "playType", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "player",
+	         "EventX", "EventY", "PassEndX", "PassEndY",
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "Successful TakeOn", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("playType")      OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD("EventX")        OVER w AS next_x,
+	    LEAD("EventY")        OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "playType", "player", "teamShortName",
+	    "EventX", "EventY",
+	    CASE
+	      WHEN "playType" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "playType" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "playType" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "playType" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "playType" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "playType" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "playType" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndX"
+	      WHEN "playType" = 'TakeOn' AND "Successful TakeOn"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "playType" = 'Pass' THEN "PassEndY"
+	      WHEN "playType" = 'TakeOn' AND "Successful TakeOn"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."playType", e."player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EventY"::numeric, 12.5) = 0 THEN FLOOR(e."EventY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EventY" / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EventX"::numeric, 8.33) = 0 THEN FLOOR(e."EventX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EventX" / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e."EventX" IS NOT NULL AND e."EventY" IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 17:14:15.644 BST [42486] ERROR:  column "player" does not exist at character 160
+2026-05-15 17:14:15.644 BST [42486] HINT:  Perhaps you meant to reference the column "events.passer".
+2026-05-15 17:14:15.644 BST [42486] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT
+	    "playType",
+	    "teamShortName",
+	    "sequenceId",
+	    "Fixture",
+	    "Date",
+	    "gameEventIndex",
+	    "player",
+	    "EventX",
+	    "EventY",
+	    "PassEndX",
+	    "PassEndY",
+	    "Goal Kick",
+	    "Throw",
+	    "Kick Off",
+	    "Free kick",
+	    "Corner",
+	    "Cross",
+	    "Successful TakeOn",
+	    "ShotEndX",
+	    "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	)
+	SELECT *
+	FROM base
+2026-05-15 17:14:34.319 BST [42486] ERROR:  column "Goal Kick" does not exist at character 235
+2026-05-15 17:14:34.319 BST [42486] HINT:  Perhaps you meant to reference the column "events.GoalKick".
+2026-05-15 17:14:34.319 BST [42486] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT
+	    "playType",
+	    "teamShortName",
+	    "sequenceId",
+	    "Fixture",
+	    "Date",
+	    "gameEventIndex",
+	    "Primary",
+	    "EventX",
+	    "EventY",
+	    "PassEndX",
+	    "PassEndY",
+	    "Goal Kick",
+	    "Throw",
+	    "Kick Off",
+	    "Free kick",
+	    "Corner",
+	    "Cross",
+	    "Successful TakeOn",
+	    "ShotEndX",
+	    "ShotEndY"
+	  FROM opta_events.events
+	  WHERE "playType" IN ('Pass', 'TakeOn')
+	)
+	SELECT *
+	FROM base
+2026-05-15 17:51:47.268 BST [36115] LOG:  checkpoint starting: time
+2026-05-15 17:51:49.973 BST [36115] LOG:  checkpoint complete: wrote 26 buffers (0.2%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=2.658 s, sync=0.025 s, total=2.706 s; sync files=22, longest=0.006 s, average=0.002 s; distance=155 kB, estimate=155 kB; lsn=A/D53CE478, redo lsn=A/D53CE420
+2026-05-15 17:51:55.304 BST [42975] ERROR:  syntax error at end of input at character 3017
+2026-05-15 17:51:55.304 BST [42975] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "Event", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "Player",
+	         x, y, finalx, finaly,
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "TakeOn Outcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events_aliased
+	  WHERE "Event" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "Event", "Player", "teamShortName", x, y,
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."Event", e."Player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e.x IS NOT NULL AND e.y IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 17:52:49.102 BST [42975] ERROR:  syntax error at end of input at character 3017
+2026-05-15 17:52:49.102 BST [42975] STATEMENT:  CREATE TABLE xt_players AS
+	WITH base AS (
+	  SELECT "Event", "teamShortName", "sequenceId", "Fixture",
+	         "Date", "gameEventIndex", "Player",
+	         x, y, finalx, finaly,
+	         "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	         "TakeOn Outcome", "ShotEndX", "ShotEndY"
+	  FROM opta_events.events_aliased
+	  WHERE "Event" IN ('Pass', 'TakeOn')
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    "Event", "Player", "teamShortName", x, y,
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS pass_type,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS end_x,
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS end_y
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e."Event", e."Player", e."teamShortName", e.pass_type,
+	    ge.value - gs.value AS xt
+	  FROM enriched e
+	  JOIN xt_grid gs
+	    ON gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  JOIN xt_grid ge
+	    ON ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.end_y::numeric, 12.5) = 0 THEN FLOOR(e.end_y / 12.5)::INT - 1
+	              ELSE FLOOR(e.end_y / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.end_x::numeric, 8.33) = 0 THEN FLOOR(e.end_x / 8.33)::INT - 1
+	              ELSE FLOOR(e.end_x / 8.33)::INT END))
+	  WHERE e.x IS NOT NULL AND e.y IS NOT NULL
+	    AND e.end_x IS NOT NULL AND e.end_y IS NOT NULL
+	)
+2026-05-15 17:56:47.969 BST [36115] LOG:  checkpoint starting: time
+2026-05-15 17:56:56.780 BST [36115] LOG:  checkpoint complete: wrote 86 buffers (0.5%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=8.777 s, sync=0.008 s, total=8.812 s; sync files=31, longest=0.002 s, average=0.001 s; distance=746 kB, estimate=746 kB; lsn=A/D5488D40, redo lsn=A/D5488CB0
+2026-05-15 18:02:06.903 BST [43159] ERROR:  syntax error at end of input at character 1111
+2026-05-15 18:02:06.903 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+2026-05-15 18:02:10.569 BST [43159] ERROR:  syntax error at end of input at character 1110
+2026-05-15 18:02:10.569 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+2026-05-15 18:02:16.970 BST [43159] ERROR:  syntax error at end of input at character 1109
+2026-05-15 18:02:16.970 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+2026-05-15 18:02:49.260 BST [43159] ERROR:  function mod(numeric) does not exist at character 3703
+2026-05-15 18:02:49.260 BST [43159] HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+2026-05-15 18:02:49.260 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	    -- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	scored AS (
+	  SELECT
+	    e.*,
+	    -- Only Pass and TakeOn events with valid coords get an xT delta.
+	    -- LEFT JOIN keeps every row; non-progressive events get NULL xT.
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX" / 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+	SELECT
+	  -- Identity
+	  "Player", "Team", "teamShortName", "Event",
+	  "League", "Date", "Fixture", "Home", "Away",
+	  "homeScore", "awayScore",
+	  -- Sequence / timing
+	  "Period", "gameClock", "gameEventIndex", "sequenceId",
+	  "SeqEventNum", "SeqStartX", "SeqStartY",
+	  -- Coordinates (raw + computed end used for xT)
+	  x, y, finalx, finaly, "EndX", "EndY",
+	  "ShotEndX", "ShotEndY", "CarryX", "CarryY",
+	  -- Pass / Shot context
+	  "PassType",
+	  "receiver", "xA", "xG", "PassResult", "PassAngle",
+	  -- Cleaned outcome labels
+	  "TakeOn Outcome Label" AS "TakeOn Outcome",
+	  "Aerial Outcome Label" AS "Aerial Outcome",
+	  "Tackle Outcome Label" AS "Tackle Outcome",
+	  -- Raw flags (kept for completeness; rename if you want)
+	  "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	  -- The headline metric
+	  "xT"
+	FROM scored
+2026-05-15 18:03:02.673 BST [43159] ERROR:  function mod(numeric) does not exist at character 3703
+2026-05-15 18:03:02.673 BST [43159] HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+2026-05-15 18:03:02.673 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	    -- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	scored AS (
+	  SELECT
+	    e.*,
+	    -- Only Pass and TakeOn events with valid coords get an xT delta.
+	    -- LEFT JOIN keeps every row; non-progressive events get NULL xT.
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX" / 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+	SELECT
+	  -- Identity
+	  "Player", "Team", "teamShortName", "Event",
+	  "League", "Date", "Fixture", "Home", "Away",
+	  "homeScore", "awayScore",
+	  -- Sequence / timing
+	  "Period", "gameClock", "gameEventIndex", "sequenceId",
+	  "SeqEventNum", "SeqStartX", "SeqStartY",
+	  -- Coordinates (raw + computed end used for xT)
+	  x, y, finalx, finaly, "EndX", "EndY",
+	  "ShotEndX", "ShotEndY", "CarryX", "CarryY",
+	  -- Pass / Shot context
+	  "PassType",
+	  "receiver", "xA", "xG", "PassResult", "PassAngle",
+	  -- Cleaned outcome labels
+	  "TakeOn Outcome Label" AS "TakeOn Outcome",
+	  "Aerial Outcome Label" AS "Aerial Outcome",
+	  "Tackle Outcome Label" AS "Tackle Outcome",
+	  -- Raw flags (kept for completeness; rename if you want)
+	  "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	  -- The headline metric
+	  "xT"
+	FROM scored
+2026-05-15 18:03:31.354 BST [43159] ERROR:  syntax error at end of input at character 3819
+2026-05-15 18:03:31.354 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	    -- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	scored AS (
+	  SELECT
+	    e.*,
+	    -- Only Pass and TakeOn events with valid coords get an xT delta.
+	    -- LEFT JOIN keeps every row; non-progressive events get NULL xT.
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX" / 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+2026-05-15 18:04:06.037 BST [43159] ERROR:  syntax error at end of input at character 1109
+2026-05-15 18:04:06.037 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+2026-05-15 18:04:15.715 BST [43159] ERROR:  syntax error at end of input at character 1388
+2026-05-15 18:04:15.715 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+2026-05-15 18:04:25.467 BST [43159] ERROR:  syntax error at end of input at character 1670
+2026-05-15 18:04:25.467 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+2026-05-15 18:04:37.887 BST [43159] ERROR:  syntax error at end of input at character 3816
+2026-05-15 18:04:37.887 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	-- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e.*,
+	    -- Only Pass and TakeOn events with valid coords get an xT delta.
+	    -- LEFT JOIN keeps every row; non-progressive events get NULL xT.
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX" / 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+2026-05-15 18:04:49.627 BST [43159] ERROR:  syntax error at end of input at character 3958
+2026-05-15 18:04:49.627 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	-- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e.*,
+	    -- Only Pass and TakeOn events with valid coords get an xT delta.
+	    -- LEFT JOIN keeps every row; non-progressive events get NULL xT.
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX" / 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+	SELECT
+	  -- Identity
+	  "Player", "Team", "teamShortName", "Event",
+	  "League", "Date", "Fixture", "Home", "Away",
+	  "homeScore", "awayScore",
+2026-05-15 18:05:14.640 BST [43159] ERROR:  function mod(numeric) does not exist at character 3700
+2026-05-15 18:05:14.640 BST [43159] HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+2026-05-15 18:05:14.640 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	-- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e.*,
+	    -- Only Pass and TakeOn events with valid coords get an xT delta.
+	    -- LEFT JOIN keeps every row; non-progressive events get NULL xT.
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX" / 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+	SELECT
+	  -- Identity
+	  "Player", "Team", "teamShortName", "Event",
+	  "League", "Date", "Fixture", "Home", "Away",
+	  "homeScore", "awayScore",
+	  -- Sequence / timing
+	  "Period", "gameClock", "gameEventIndex", "sequenceId",
+	  "SeqEventNum", "SeqStartX", "SeqStartY",
+	  -- Coordinates (raw + computed end used for xT)
+	  x, y, finalx, finaly, "EndX", "EndY",
+	  "ShotEndX", "ShotEndY", "CarryX", "CarryY",
+	  -- Pass / Shot context
+	  "PassType",
+	  "receiver", "xA", "xG", "PassResult", "PassAngle",
+	  -- Cleaned outcome labels
+	  "TakeOn Outcome Label" AS "TakeOn Outcome",
+	  "Aerial Outcome Label" AS "Aerial Outcome",
+	  "Tackle Outcome Label" AS "Tackle Outcome",
+	  -- Raw flags (kept for completeness; rename if you want)
+	  "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	  -- The headline metric
+	  "xT"
+	FROM scored
+2026-05-15 18:05:54.757 BST [43159] ERROR:  function mod(numeric) does not exist at character 3700
+2026-05-15 18:05:54.757 BST [43159] HINT:  No function matches the given name and argument types. You might need to add explicit type casts.
+2026-05-15 18:05:54.757 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	 -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')  THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	-- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e.*,
+	    -- Only Pass and TakeOn events with valid coords get an xT delta.
+	    -- LEFT JOIN keeps every row; non-progressive events get NULL xT.
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX" / 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+	SELECT
+	  -- Identity
+	  "Player", "Team", "teamShortName", "Event",
+	  "League", "Date", "Fixture", "Home", "Away",
+	  "homeScore", "awayScore",
+	  -- Sequence / timing
+	  "Period", "gameClock", "gameEventIndex", "sequenceId",
+	  "SeqEventNum", "SeqStartX", "SeqStartY",
+	  -- Coordinates (raw + computed end used for xT)
+	  x, y, finalx, finaly, "EndX", "EndY",
+	  "ShotEndX", "ShotEndY", "CarryX", "CarryY",
+	  -- Pass / Shot context
+	  "PassType",
+	  "receiver", "xA", "xG", "PassResult", "PassAngle",
+	  -- Cleaned outcome labels
+	  "TakeOn Outcome Label" AS "TakeOn Outcome",
+	  "Aerial Outcome Label" AS "Aerial Outcome",
+	  "Tackle Outcome Label" AS "Tackle Outcome",
+	  -- Raw flags (kept for completeness; rename if you want)
+	  "Goal Kick", "Throw", "Kick Off", "Free kick", "Corner", "Cross",
+	  -- The headline metric
+	  "xT"
+	FROM scored
+2026-05-15 18:07:52.935 BST [43159] ERROR:  syntax error at end of input at character 1111
+2026-05-15 18:07:52.935 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+2026-05-15 18:08:14.722 BST [43159] ERROR:  syntax error at end of input at character 3695
+2026-05-15 18:08:14.722 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	    -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')   THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')   THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	    -- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e.*,
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX"::numeric, 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+2026-05-15 18:08:22.287 BST [43159] ERROR:  syntax error at end of input at character 3837
+2026-05-15 18:08:22.287 BST [43159] STATEMENT:  CREATE TABLE opta_events.xtevents AS
+	WITH base AS (
+	  SELECT *
+	  FROM opta_events.events_aliased
+	),
+	
+	with_ends AS (
+	  SELECT
+	    *,
+	    LEAD("Event")         OVER w AS next_event,
+	    LEAD("teamShortName") OVER w AS next_team,
+	    LEAD("sequenceId")    OVER w AS next_seq,
+	    LEAD("Fixture")       OVER w AS next_fixture,
+	    LEAD(x)               OVER w AS next_x,
+	    LEAD(y)               OVER w AS next_y
+	  FROM base
+	  WINDOW w AS (ORDER BY "Date", "Fixture", "gameEventIndex")
+	),
+	
+	enriched AS (
+	  SELECT
+	    *,
+	    -- PassType: matches JS PART A priority order (specific types beat 'Open Play')
+	    CASE
+	      WHEN "Event" = 'Pass' AND "Goal Kick" = 'True' THEN 'Goal Kick'
+	      WHEN "Event" = 'Pass' AND "Throw"     = 'True' THEN 'Throw'
+	      WHEN "Event" = 'Pass' AND "Kick Off"  = 'True' THEN 'Kick Off'
+	      WHEN "Event" = 'Pass' AND "Free kick" = 'True' THEN 'Free kick'
+	      WHEN "Event" = 'Pass' AND "Corner"    = 'True' THEN 'Corner'
+	      WHEN "Event" = 'Pass' AND "Cross"     = 'True' THEN 'Cross'
+	      WHEN "Event" = 'Pass'                          THEN 'Open Play'
+	    END AS "PassType",
+	    -- TakeOn Outcome: JS PART B
+	    CASE
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')   THEN 'Successful'
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "TakeOn Outcome Label",
+	    -- Aerial Outcome: JS PART G
+	    CASE
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('1', 'true', 'True')   THEN 'Successful'
+	      WHEN "Event" = 'Aerial' AND "Aerial Outcome"::text IN ('0', 'false', 'False') THEN 'Unsuccessful'
+	    END AS "Aerial Outcome Label",
+	    -- Tackle Outcome: JS PART H (text 'True'/'False' in the source)
+	    CASE
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('True', 'true', '1')   THEN 'Successful'
+	      WHEN "Event" = 'Tackle' AND "Tackle Outcome"::text IN ('False', 'false', '0') THEN 'Unsuccessful'
+	    END AS "Tackle Outcome Label",
+	    -- EndX / EndY: the coordinates used for xT lookup
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finalx
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndX" ELSE next_x END
+	    END AS "EndX",
+	    CASE
+	      WHEN "Event" = 'Pass' THEN finaly
+	      WHEN "Event" = 'TakeOn' AND "TakeOn Outcome"::text IN ('1', 'true', 'True')
+	           AND next_fixture = "Fixture" AND next_seq = "sequenceId"
+	        THEN CASE WHEN next_event = 'Free kick' AND next_team = "teamShortName"
+	                  THEN "ShotEndY" ELSE next_y END
+	    END AS "EndY"
+	  FROM with_ends
+	),
+	
+	scored AS (
+	  SELECT
+	    e.*,
+	    ge.value - gs.value AS "xT"
+	  FROM enriched e
+	  LEFT JOIN xt_grid gs
+	    ON e.x IS NOT NULL AND e.y IS NOT NULL
+	   AND gs.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e.y::numeric, 12.5) = 0 THEN FLOOR(e.y / 12.5)::INT - 1
+	              ELSE FLOOR(e.y / 12.5)::INT END))
+	   AND gs.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e.x::numeric, 8.33) = 0 THEN FLOOR(e.x / 8.33)::INT - 1
+	              ELSE FLOOR(e.x / 8.33)::INT END))
+	  LEFT JOIN xt_grid ge
+	    ON e."EndX" IS NOT NULL AND e."EndY" IS NOT NULL
+	   AND ge.row_idx = LEAST(7, GREATEST(0,
+	         CASE WHEN MOD(e."EndY"::numeric, 12.5) = 0 THEN FLOOR(e."EndY" / 12.5)::INT - 1
+	              ELSE FLOOR(e."EndY" / 12.5)::INT END))
+	   AND ge.col_idx = LEAST(11, GREATEST(0,
+	         CASE WHEN MOD(e."EndX"::numeric, 8.33) = 0 THEN FLOOR(e."EndX" / 8.33)::INT - 1
+	              ELSE FLOOR(e."EndX" / 8.33)::INT END))
+	)
+	SELECT
+	  -- Identity
+	  "Player", "Team", "teamShortName", "Event",
+	  "League", "Date", "Fixture", "Home", "Away",
+	  "homeScore", "awayScore",
+2026-05-15 18:09:47.776 BST [36115] LOG:  checkpoint starting: wal
+2026-05-15 18:10:15.138 BST [36115] LOG:  checkpoint complete: wrote 29 buffers (0.2%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=26.591 s, sync=0.684 s, total=27.362 s; sync files=21, longest=0.680 s, average=0.033 s; distance=537346 kB, estimate=537346 kB; lsn=B/13EA4128, redo lsn=A/F61497A0
+2026-05-15 18:10:17.718 BST [36115] LOG:  checkpoint starting: wal
+2026-05-15 18:10:46.663 BST [36115] LOG:  checkpoint complete: wrote 6 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=27.976 s, sync=0.879 s, total=28.946 s; sync files=4, longest=0.874 s, average=0.220 s; distance=540768 kB, estimate=540768 kB; lsn=B/34F044A0, redo lsn=B/17161918
+2026-05-15 18:10:48.704 BST [36115] LOG:  checkpoint starting: wal
+2026-05-15 18:11:11.044 BST [36115] LOG:  checkpoint complete: wrote 2064 buffers (12.6%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=21.578 s, sync=0.651 s, total=22.341 s; sync files=8, longest=0.638 s, average=0.082 s; distance=539784 kB, estimate=540669 kB; lsn=B/55C47F40, redo lsn=B/38083B10
+2026-05-15 18:11:13.068 BST [36115] LOG:  checkpoints are occurring too frequently (25 seconds apart)
+2026-05-15 18:11:13.068 BST [36115] HINT:  Consider increasing the configuration parameter "max_wal_size".
+2026-05-15 18:11:13.069 BST [36115] LOG:  checkpoint starting: wal
+2026-05-15 18:11:32.103 BST [36115] LOG:  checkpoint complete: wrote 18 buffers (0.1%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 33 recycled; write=18.802 s, sync=0.013 s, total=19.035 s; sync files=4, longest=0.005 s, average=0.004 s; distance=540213 kB, estimate=540624 kB; lsn=B/6584F6F8, redo lsn=B/59011110
+2026-05-15 18:49:36.873 BST [36115] LOG:  checkpoint starting: time
+2026-05-15 18:53:08.992 BST [36115] LOG:  checkpoint complete: wrote 2079 buffers (12.7%), wrote 1 SLRU buffers; 0 WAL file(s) added, 0 removed, 12 recycled; write=212.031 s, sync=0.011 s, total=212.121 s; sync files=15, longest=0.005 s, average=0.001 s; distance=205050 kB, estimate=507066 kB; lsn=B/6584F9A0, redo lsn=B/6584F910
+2026-05-15 18:59:31.632 BST [43991] ERROR:  column "homeTeam" does not exist at character 666
+2026-05-15 18:59:31.632 BST [43991] STATEMENT:  
+	    SELECT
+	        "Player",
+	        "Team",
+	        "teamShortName" ,
+	        "Event",
+	        "Date",
+	        "Fixture",
+	        "gameClock",
+	        "gameEventIndex",
+	        "sequenceId",
+	        "SeqEventNum",
+	        "SeqStartX",
+	        "SeqStartY",
+	        "Period",
+	        "x",
+	        "y",
+	        "finalx",
+	        "finaly",
+	        "receiver",
+	        "xA",
+	        "xG",
+	        "xT",
+	        "TakeOn Outcome" AS "TakeOn_Outcome",
+	        "Aerial Outcome" AS "Aerial_Outcome",
+	        "Tackle Outcome" AS "Tackle_Outcome",
+	        "PassResult",
+	        "PassAngle",
+	        "ShotEndX",
+	        "ShotEndY",
+	        "CarryX",
+	        "CarryY",
+	        "homeTeam" AS "Home",
+	        "awayTeam" AS "Away",
+	        "homeFinalScore" AS "homeScore",
+	        "awayFinalScore" AS "awayScore",
+	        "League"
+	    FROM opta_events.xtevents
+	
+2026-05-15 19:09:36.968 BST [36115] LOG:  checkpoint starting: time
+2026-05-15 19:09:37.220 BST [36115] LOG:  checkpoint complete: wrote 2 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.215 s, sync=0.003 s, total=0.254 s; sync files=1, longest=0.003 s, average=0.003 s; distance=13 kB, estimate=456361 kB; lsn=B/65852F38, redo lsn=B/65852EE0
+2026-05-15 19:26:16.782 BST [36111] LOG:  received fast shutdown request
+2026-05-15 19:26:16.788 BST [36111] LOG:  aborting any active transactions
+2026-05-15 19:26:16.796 BST [36111] LOG:  background worker "logical replication launcher" (PID 36120) exited with exit code 1
+2026-05-15 19:26:16.798 BST [36115] LOG:  shutting down
+2026-05-15 19:26:16.800 BST [36115] LOG:  checkpoint starting: shutdown immediate
+2026-05-15 19:26:16.829 BST [36115] LOG:  checkpoint complete: wrote 0 buffers (0.0%), wrote 0 SLRU buffers; 0 WAL file(s) added, 0 removed, 0 recycled; write=0.006 s, sync=0.001 s, total=0.032 s; sync files=0, longest=0.000 s, average=0.000 s; distance=0 kB, estimate=410725 kB; lsn=B/65852FE8, redo lsn=B/65852FE8
+2026-05-15 19:26:16.861 BST [36111] LOG:  database system is shut down
